@@ -1,10 +1,9 @@
-import 'dart:developer';
 import 'package:device_preview/device_preview.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:animate_do/animate_do.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:poc_firebase_and_postgres/api.dart';
 import 'package:poc_firebase_and_postgres/firebase_options.dart';
 
 void main() async {
@@ -43,6 +42,7 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
+  final _storage = const FlutterSecureStorage();
 
   bool _isLogin = false;
   bool _isLoading = false;
@@ -72,8 +72,15 @@ class _HomePageState extends State<HomePage> {
 
     try {
       if (_isLogin) {
-        await _auth.signInWithEmailAndPassword(
-            email: email, password: password);
+        UserCredential userCredential = await _auth.signInWithEmailAndPassword(
+          email: email,
+          password: password,
+        );
+        String? idToken = await userCredential.user?.getIdToken();
+
+        // Call API with idToken
+        await Api(serverUrl: "http://192.168.1.14:8080/poc", context: context)
+            .loginWithFirebaseToken(idToken!);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("Logged in successfully!")),
         );
@@ -87,7 +94,7 @@ class _HomePageState extends State<HomePage> {
 
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (context) => TokenPage(auth: _auth)),
+        MaterialPageRoute(builder: (context) => const TokenPage()),
       );
 
       _emailController.clear();
@@ -246,96 +253,100 @@ class _HomePageState extends State<HomePage> {
 }
 
 class TokenPage extends StatefulWidget {
-  final FirebaseAuth auth;
-
-  const TokenPage({Key? key, required this.auth}) : super(key: key);
+  const TokenPage({Key? key}) : super(key: key);
 
   @override
-  State<TokenPage> createState() => _TokenPageState();
+  _TokenPageState createState() => _TokenPageState();
 }
 
 class _TokenPageState extends State<TokenPage> {
-  String _idToken = "Fetching...";
+  late Api _api;
+  bool _isAutoRefreshEnabled = false;
 
   @override
   void initState() {
     super.initState();
-    _getIdToken();
+    _api = Api(
+      serverUrl: 'http://192.168.1.14:8080/poc', // Your API base URL
+      context: context,
+    );
+
+    // Load tokens on app launch
+    _loadTokens();
   }
 
-  Future<void> _getIdToken() async {
-    try {
-      final idToken = await widget.auth.currentUser?.getIdToken(true);
+  // Load tokens and set up auto-refresh
+  Future<void> _loadTokens() async {
+    await _api.loadTokens();
+
+    if (_api.accessToken != null) {
       setState(() {
-        _idToken = idToken ?? "No Token Found";
+        _isAutoRefreshEnabled = true;
       });
-    } catch (e) {
-      log("Error fetching token: $e");
+
+      _api.startAutoRefresh();
     }
   }
 
-  void _copyToClipboard() {
-    Clipboard.setData(ClipboardData(text: _idToken));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Token copied to clipboard!")),
-    );
+  // Handle auto-refresh toggle switch
+  void _toggleAutoRefresh(bool value) {
+    setState(() {
+      _isAutoRefreshEnabled = value;
+
+      if (_isAutoRefreshEnabled) {
+        _api.startAutoRefresh(); // Start auto-refresh
+        _showSnackbar('Auto-refresh Enabled');
+      } else {
+        _api.stopAutoRefresh(); // Stop auto-refresh
+        _showSnackbar('Auto-refresh Disabled');
+      }
+    });
   }
 
-  Future<void> _logout() async {
-    await widget.auth.signOut();
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (context) => const HomePage()),
-    );
+  // Show snackbar
+  void _showSnackbar(String message) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
+    _api.stopAutoRefresh(); // Ensure auto-refresh stops when the page is disposed
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Token Page"),
-        actions: [
-          IconButton(
-            onPressed: _logout,
-            icon: const Icon(Icons.logout),
-            tooltip: "Logout",
-          ),
-        ],
+        title: const Text('Token API Example'),
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(16.0),
-                decoration: BoxDecoration(
-                  color: Colors.grey[200],
-                  borderRadius: BorderRadius.circular(8.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            ElevatedButton(
+              onPressed: _loadTokens,
+              child: const Text('Reload Tokens'),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () => _api.issueRequest('/get-message'),
+              child: const Text('Call API'),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text('Auto Refresh: '),
+                Switch(
+                  value: _isAutoRefreshEnabled,
+                  onChanged: _toggleAutoRefresh,
                 ),
-                child: Text(
-                  _idToken,
-                  style: const TextStyle(fontSize: 16),
-                ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  ElevatedButton(
-                    onPressed: _getIdToken,
-                    child: const Text("Refresh Token"),
-                  ),
-                  ElevatedButton(
-                    onPressed: _copyToClipboard,
-                    child: const Text("Copy Token"),
-                  ),
-                ],
-              ),
-            ],
-          ),
+              ],
+            ),
+          ],
         ),
       ),
     );
